@@ -180,11 +180,12 @@ var rooms = make(map[string]*Room)
 type WSMessage struct {
 	Move string `json:"move"` // Recebe do Flutter. Ex: "e2e4"
 }
-
+// 1. Adicione o PlayerCount no struct
 type WSResponse struct {
-	FEN    string `json:"fen"`
-	Turn   string `json:"turn"`
-	Status string `json:"status"`
+	FEN         string `json:"fen"`
+	Turn        string `json:"turn"`
+	Status      string `json:"status"`
+	PlayerCount int    `json:"player_count"` // O Flutter usará isso para liberar o jogo
 }
 
 func playWsHandler(w http.ResponseWriter, r *http.Request) {
@@ -194,8 +195,12 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// Simplificação: usando uma sala estática. No futuro, você pega o ID da sala pela URL.
-	roomID := "sala_1" 
+	// 2. Captura o código da sala da URL enviada pelo Flutter
+	roomID := r.URL.Query().Get("room")
+	if roomID == "" {
+		return // Rejeita conexão sem sala
+	}
+
 	if _, exists := rooms[roomID]; !exists {
 		rooms[roomID] = &Room{
 			Game:    chess.NewGame(),
@@ -204,40 +209,43 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	room := rooms[roomID]
+
+	// 3. Trava de segurança: Se já tem 2 pessoas, não deixa entrar mais ninguém
+	if len(room.Clients) >= 2 {
+		conn.WriteJSON(map[string]string{"error": "Sala cheia"})
+		return
+	}
+
 	room.Clients[conn] = true
 
-	// Atualiza o jogador recém-conectado com as posições atuais
+	// 4. Avisa a todos na sala que alguém entrou/saiu
 	enviarEstado(room)
 
 	for {
 		var msg WSMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			delete(room.Clients, conn)
+			delete(room.Clients, conn) // Remove o jogador se a conexão cair
+			enviarEstado(room)         // Avisa o outro que ele ficou sozinho
 			break
 		}
 
-		// 1. O Backend tenta decodificar a intenção bruta (ex: "e2e4")
 		move, err := chess.UCINotation{}.Decode(room.Game.Position(), msg.Move)
-		
-		// 2. Se a notação for válida, tenta executar o lance (valida xeque, turno, física, etc)
 		if err == nil {
 			err = room.Game.Move(move) 
 			if err == nil {
-				// 3. Lance aceito! Salva no MongoDB e manda o tabuleiro novo pro Flutter desenhar
 				salvarPartidaNoMongo(roomID, room.Game.FEN())
 				enviarEstado(room)
 			}
 		}
-		// OBS: Se o movimento for ilegal, o err será != nil. 
-		// Simplesmente não fazemos nada. O Flutter continuará com o tabuleiro antigo.
 	}
 }
 
 func enviarEstado(room *Room) {
 	resp := WSResponse{
-		FEN:    room.Game.FEN(),
-		Turn:   room.Game.Position().Turn().Name(), // Retorna "White" ou "Black"
-		Status: room.Game.Outcome().String(),       // Retorna "1/2-1/2", "1-0", etc no fim do jogo
+		FEN:         room.Game.FEN(),
+		Turn:        room.Game.Position().Turn().Name(),
+		Status:      room.Game.Outcome().String(),
+		PlayerCount: len(room.Clients), // Conta quantos WebSockets estão ativos
 	}
 	for client := range room.Clients {
 		client.WriteJSON(resp)
