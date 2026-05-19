@@ -166,3 +166,89 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		"token": "fake-jwt-token-para-exemplo",
 	})
 }
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+
+// Representa uma sala ativa na memória
+type Room struct {
+	Game    *chess.Game
+	Clients map[*websocket.Conn]bool
+}
+
+var rooms = make(map[string]*Room)
+
+// Estruturas de entrada e saída
+type WSMessage struct {
+	Move string `json:"move"` // Recebe do Flutter. Ex: "e2e4"
+}
+
+type WSResponse struct {
+	FEN    string `json:"fen"`
+	Turn   string `json:"turn"`
+	Status string `json:"status"`
+}
+
+func playWsHandler(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	// Simplificação: usando uma sala estática. No futuro, você pega o ID da sala pela URL.
+	roomID := "sala_1" 
+	if _, exists := rooms[roomID]; !exists {
+		rooms[roomID] = &Room{
+			Game:    chess.NewGame(),
+			Clients: make(map[*websocket.Conn]bool),
+		}
+	}
+	
+	room := rooms[roomID]
+	room.Clients[conn] = true
+
+	// Atualiza o jogador recém-conectado com as posições atuais
+	enviarEstado(room)
+
+	for {
+		var msg WSMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			delete(room.Clients, conn)
+			break
+		}
+
+		// 1. O Backend tenta decodificar a intenção bruta (ex: "e2e4")
+		move, err := chess.UCINotation{}.Decode(room.Game.Position(), msg.Move)
+		
+		// 2. Se a notação for válida, tenta executar o lance (valida xeque, turno, física, etc)
+		if err == nil {
+			err = room.Game.Move(move) 
+			if err == nil {
+				// 3. Lance aceito! Salva no MongoDB e manda o tabuleiro novo pro Flutter desenhar
+				salvarPartidaNoMongo(roomID, room.Game.FEN())
+				enviarEstado(room)
+			}
+		}
+		// OBS: Se o movimento for ilegal, o err será != nil. 
+		// Simplesmente não fazemos nada. O Flutter continuará com o tabuleiro antigo.
+	}
+}
+
+func enviarEstado(room *Room) {
+	resp := WSResponse{
+		FEN:    room.Game.FEN(),
+		Turn:   room.Game.Position().Turn().Name(), // Retorna "White" ou "Black"
+		Status: room.Game.Outcome().String(),       // Retorna "1/2-1/2", "1-0", etc no fim do jogo
+	}
+	for client := range room.Clients {
+		client.WriteJSON(resp)
+	}
+}
+
+func salvarPartidaNoMongo(roomID, fen string) {
+	// Atualiza silenciosamente no banco
+	matchesCollection.UpdateOne(
+		context.Background(),
+		bson.M{"_id": roomID},
+		bson.M{"$set": bson.M{"current_fen": fen}},
+	)
+}
