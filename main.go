@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os" // <-- IMPORTE O PACOTE OS
+	"os"
 	"time"
-
+	"github.com/gorilla/websocket"
+	"github.com/corentings/chess"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -16,6 +17,7 @@ import (
 )
 
 var collection *mongo.Collection
+var matchesCollection *mongo.Collection
 
 type User struct {
 	Username string `json:"username" bson:"username"`
@@ -44,6 +46,7 @@ func main() {
 	}
 
 	collection = client.Database("auth_db").Collection("users")
+	matchesCollection = client.Database("auth_db").Collection("matches")
 	fmt.Println("Conectado ao MongoDB Atlas com sucesso!")
 
 	http.HandleFunc("/api/register", enableCORS(registerHandler))
@@ -261,46 +264,33 @@ func salvarPartidaNoMongo(roomID, fen string) {
 		bson.M{"$set": bson.M{"current_fen": fen}},
 	)
 }
+// Crie esta struct para formatar a resposta JSON (Pode colocar junto com as outras structs)
+type RoomInfo struct {
+	ID        string `json:"id"`
+	Nome      string `json:"nome"`
+	Jogadores int    `json:"jogadores"`
+}
 
-class _JoinRoomScreenState extends State<JoinRoomScreen> {
-  // 1. A lista agora começa vazia
-  List<Map<String, dynamic>> _salasDisponiveis = [];
-  
-  // 2. Variável para mostrar um "Carregando..." enquanto busca os dados
-  bool _isLoading = true;
+// Handler para listar as salas disponíveis
+func getRoomsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*") 
 
-  // 3. O initState faz a busca assim que a tela abre
-  @override
-  void initState() {
-    super.initState();
-    _buscarSalas();
-  }
+	var activeRooms []RoomInfo
 
-  // 4. A função que bate no seu servidor Go
-  Future<void> _buscarSalas() async {
-    try {
-      // ATENÇÃO: Coloque aqui o link do seu backend Go.
-      // Se estiver rodando no PC, use localhost (ou o IP local se estiver testando no celular).
-      // Se já publicou no Render, use a URL do Render: 'https://seu-app.onrender.com/api/rooms'
-      final response = await http.get(Uri.parse('http://localhost:8080/api/rooms'));
+	for id, room := range rooms {
+		if len(room.Clients) < 2 {
+			activeRooms = append(activeRooms, RoomInfo{
+				ID:        id,
+				Nome:      "Sala " + id, 
+				Jogadores: len(room.Clients),
+			})
+		}
+	}
 
-      if (response.statusCode == 200) {
-        List<dynamic> dadosJson = jsonDecode(response.body);
-        
-        setState(() {
-          // Mapeia o JSON que veio do Go para o formato que o Flutter espera
-          _salasDisponiveis = dadosJson.map((sala) => {
-            'id': sala['id'].toString(),
-            'nome': sala['nome'].toString(),
-            'jogadores': sala['jogadores'],
-          }).toList();
-          _isLoading = false; // Terminou de carregar
-        });
-      }
-    } catch (e) {
-      print("Erro ao buscar salas: $e");
-      setState(() {
-        _isLoading = false; // Termina de carregar mesmo se der erro
-      });
-    }
-  }
+	if activeRooms == nil {
+		activeRooms = []RoomInfo{}
+	}
+
+	json.NewEncoder(w).Encode(activeRooms)
+}
