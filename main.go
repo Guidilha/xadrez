@@ -184,12 +184,12 @@ var rooms = make(map[string]*Room)
 type WSMessage struct {
 	Move string `json:"move"` // Recebe do Flutter. Ex: "e2e4"
 }
-// 1. Adicione o PlayerCount no struct
 type WSResponse struct {
-	FEN         string `json:"fen"`
-	Turn        string `json:"turn"`
-	Status      string `json:"status"`
-	PlayerCount int    `json:"player_count"` // O Flutter usará isso para liberar o jogo
+	FEN         string   `json:"fen"`
+	Turn        string   `json:"turn"`
+	Status      string   `json:"status"`
+	PlayerCount int      `json:"player_count"`
+	ValidMoves  []string `json:"valid_moves"`
 }
 
 func playWsHandler(w http.ResponseWriter, r *http.Request) {
@@ -199,10 +199,9 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
-	// 2. Captura o código da sala da URL enviada pelo Flutter
 	roomID := r.URL.Query().Get("room")
 	if roomID == "" {
-		return // Rejeita conexão sem sala
+		return 
 	}
 
 	if _, exists := rooms[roomID]; !exists {
@@ -214,23 +213,34 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	
 	room := rooms[roomID]
 
-	// 3. Trava de segurança: Se já tem 2 pessoas, não deixa entrar mais ninguém
 	if len(room.Clients) >= 2 {
 		conn.WriteJSON(map[string]string{"error": "Sala cheia"})
 		return
 	}
 
 	room.Clients[conn] = true
-
-	// 4. Avisa a todos na sala que alguém entrou/saiu
 	enviarEstado(room)
 
 	for {
 		var msg WSMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			delete(room.Clients, conn) // Remove o jogador se a conexão cair
-			enviarEstado(room)         // Avisa o outro que ele ficou sozinho
+			delete(room.Clients, conn) // Jogador desconectou
+			
+			// SOLUÇÃO DO ESTADO ZUMBI AQUI:
+			if len(room.Clients) == 0 {
+				delete(rooms, roomID) // Se não sobrou ninguém, DELETA a sala da memória
+			} else {
+				room.Game = chess.NewGame() // Se sobrou 1 pessoa, reseta o jogo para ela
+				enviarEstado(room) 
+			}
 			break
+		}
+
+		// SOLUÇÃO DA REVANCHE AQUI:
+		if msg.Move == "rematch" {
+			room.Game = chess.NewGame() // Reseta o tabuleiro
+			enviarEstado(room)          // Avisa os dois celulares
+			continue
 		}
 
 		move, err := chess.UCINotation{}.Decode(room.Game.Position(), msg.Move)
@@ -243,14 +253,21 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
 func enviarEstado(room *Room) {
+	// Puxa todos os movimentos válidos gerados pelo motor de xadrez
+	var validMovesStr []string
+	for _, move := range room.Game.ValidMoves() {
+		validMovesStr = append(validMovesStr, move.String())
+	}
+
 	resp := WSResponse{
 		FEN:         room.Game.FEN(),
 		Turn:        room.Game.Position().Turn().Name(),
 		Status:      room.Game.Outcome().String(),
-		PlayerCount: len(room.Clients), // Conta quantos WebSockets estão ativos
+		PlayerCount: len(room.Clients),
+		ValidMoves:  validMovesStr, // Envia para o Flutter
 	}
+	
 	for client := range room.Clients {
 		client.WriteJSON(resp)
 	}
