@@ -24,6 +24,11 @@ type User struct {
 	Password string `json:"password" bson:"password"`
 }
 
+type ClientInfo struct {
+	Username string
+	IsWhite  bool
+}
+
 func main() {
 	// 1. Pega a URI do banco das variáveis de ambiente do Render
 	mongoURI := os.Getenv("MONGO_URI")
@@ -52,7 +57,7 @@ func main() {
 	http.HandleFunc("/api/register", enableCORS(registerHandler))
 	http.HandleFunc("/api/login", enableCORS(loginHandler))
 	http.HandleFunc("/api/rooms", getRoomsHandler)
-
+	http.HandleFunc("/ws/play", playWsHandler)
 	// Usa a porta dinâmica obtida do sistema
 	fmt.Println("Servidor rodando na porta :" + port + "...")
 	log.Fatal(http.ListenAndServe(":"+port, nil))
@@ -170,27 +175,29 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		"token": "fake-jwt-token-para-exemplo",
 	})
 }
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
-// Representa uma sala ativa na memória
 type Room struct {
-	Game    *chess.Game
-	Clients map[*websocket.Conn]bool
+	Game         *chess.Game
+	Clients      map[*websocket.Conn]*ClientInfo // Agora guarda o ClientInfo
+	RematchVotes map[*websocket.Conn]bool        // Conta quem votou na revanche
 }
 
 var rooms = make(map[string]*Room)
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 // Estruturas de entrada e saída
 type WSMessage struct {
 	Move string `json:"move"` // Recebe do Flutter. Ex: "e2e4"
 }
 type WSResponse struct {
-	FEN         string   `json:"fen"`
-	Turn        string   `json:"turn"`
-	Status      string   `json:"status"`
-	PlayerCount int      `json:"player_count"`
-	ValidMoves  []string `json:"valid_moves"`
-}
+	FEN          string   `json:"fen"`
+	Turn         string   `json:"turn"`
+	Status       string   `json:"status"`
+	PlayerCount  int      `json:"player_count"`
+	ValidMoves   []string `json:"valid_moves"`
+	WhiteName    string   `json:"white_name"`    // NOVO: Nome das Brancas
+	BlackName    string   `json:"black_name"`    // NOVO: Nome das Pretas
+	RematchVotes int      `json:"rematch_votes"` // NOVO: Quantos pediram revanche
+}	
 
 func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -200,14 +207,16 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	roomID := r.URL.Query().Get("room")
-	if roomID == "" {
-		return 
-	}
+	username := r.URL.Query().Get("user") // O Flutter vai mandar o nome por aqui!
+	
+	if roomID == "" { return }
+	if username == "" { username = "Anônimo" }
 
 	if _, exists := rooms[roomID]; !exists {
 		rooms[roomID] = &Room{
-			Game:    chess.NewGame(),
-			Clients: make(map[*websocket.Conn]bool),
+			Game:         chess.NewGame(),
+			Clients:      make(map[*websocket.Conn]*ClientInfo),
+			RematchVotes: make(map[*websocket.Conn]bool),
 		}
 	}
 	
@@ -218,28 +227,39 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	room.Clients[conn] = true
+	// Define a cor: Se já tem alguém e é branco, o novo é preto.
+	isWhite := true
+	for _, info := range room.Clients {
+		if info.IsWhite { isWhite = false }
+	}
+
+	room.Clients[conn] = &	{Username: username, IsWhite: isWhite}
 	enviarEstado(room)
 
 	for {
 		var msg WSMessage
 		if err := conn.ReadJSON(&msg); err != nil {
-			delete(room.Clients, conn) // Jogador desconectou
+			delete(room.Clients, conn) 
+			delete(room.RematchVotes, conn) // Tira o voto se o cara sair
 			
-			// SOLUÇÃO DO ESTADO ZUMBI AQUI:
 			if len(room.Clients) == 0 {
-				delete(rooms, roomID) // Se não sobrou ninguém, DELETA a sala da memória
+				delete(rooms, roomID) 
 			} else {
-				room.Game = chess.NewGame() // Se sobrou 1 pessoa, reseta o jogo para ela
+				room.Game = chess.NewGame() 
+				room.RematchVotes = make(map[*websocket.Conn]bool)
 				enviarEstado(room) 
 			}
 			break
 		}
 
-		// SOLUÇÃO DA REVANCHE AQUI:
+		// LÓGICA DE CONSENSO DA REVANCHE
 		if msg.Move == "rematch" {
-			room.Game = chess.NewGame() // Reseta o tabuleiro
-			enviarEstado(room)          // Avisa os dois celulares
+			room.RematchVotes[conn] = true
+			if len(room.RematchVotes) == 2 { // Se os DOIS votaram
+				room.Game = chess.NewGame() 
+				room.RematchVotes = make(map[*websocket.Conn]bool) 
+			}
+			enviarEstado(room) 
 			continue
 		}
 
@@ -254,18 +274,30 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 func enviarEstado(room *Room) {
-	// Puxa todos os movimentos válidos gerados pelo motor de xadrez
 	var validMovesStr []string
 	for _, move := range room.Game.ValidMoves() {
 		validMovesStr = append(validMovesStr, move.String())
 	}
 
+	// Descobre quem é quem para mandar para o Flutter
+	whiteName, blackName := "Aguardando...", "Aguardando..."
+	for _, info := range room.Clients {
+		if info.IsWhite {
+			whiteName = info.Username
+		} else {
+			blackName = info.Username
+		}
+	}
+
 	resp := WSResponse{
-		FEN:         room.Game.FEN(),
-		Turn:        room.Game.Position().Turn().Name(),
-		Status:      room.Game.Outcome().String(),
-		PlayerCount: len(room.Clients),
-		ValidMoves:  validMovesStr, // Envia para o Flutter
+		FEN:          room.Game.FEN(),
+		Turn:         room.Game.Position().Turn().Name(),
+		Status:       room.Game.Outcome().String(),
+		PlayerCount:  len(room.Clients),
+		ValidMoves:   validMovesStr,
+		WhiteName:    whiteName,
+		BlackName:    blackName,
+		RematchVotes: len(room.RematchVotes), // Manda quantos já pediram revanche
 	}
 	
 	for client := range room.Clients {
