@@ -267,7 +267,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = room.Game.Move(move) 
 			if err == nil {
-				salvarPartidaNoMongo(roomID, room.Game.FEN())
+				salvarPartidaNoMongo(roomID, room)
 				enviarEstado(room)
 			}
 		}
@@ -305,12 +305,24 @@ func enviarEstado(room *Room) {
 	}
 }
 
-func salvarPartidaNoMongo(roomID, fen string) {
-	// Atualiza silenciosamente no banco
+func salvarPartidaNoMongo(roomID string, room *Room) {
+	whiteName, blackName := "Desconhecido", "Desconhecido"
+	for _, info := range room.Clients {
+		if info.IsWhite { whiteName = info.Username } else { blackName = info.Username }
+	}
+
+	opts := options.Update().SetUpsert(true) // Cria o registro se não existir
 	matchesCollection.UpdateOne(
 		context.Background(),
 		bson.M{"_id": roomID},
-		bson.M{"$set": bson.M{"current_fen": fen}},
+		bson.M{"$set": bson.M{
+			"current_fen": room.Game.FEN(),
+			"white_name":  whiteName,
+			"black_name":  blackName,
+			"status":      room.Game.Outcome().String(),
+			"date":        time.Now().Format("02/01/2006"), // Salva a data atual
+		}},
+		opts,
 	)
 }
 // Crie esta struct para formatar a resposta JSON (Pode colocar junto com as outras structs)
@@ -342,4 +354,41 @@ func getRoomsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(activeRooms)
+}
+// Handler que busca no MongoDB as partidas que o usuário jogou
+func getHistoryHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	username := r.URL.Query().Get("user")
+	if username == "" {
+		json.NewEncoder(w).Encode([]bson.M{})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Busca no banco onde o nome for igual ao das Brancas OU das Pretas
+	filter := bson.M{
+		"$or": []bson.M{
+			{"white_name": username},
+			{"black_name": username},
+		},
+	}
+
+	cursor, err := matchesCollection.Find(ctx, filter)
+	if err != nil {
+		json.NewEncoder(w).Encode([]bson.M{})
+		return
+	}
+	
+	var matches []bson.M
+	if err = cursor.All(ctx, &matches); err != nil {
+		json.NewEncoder(w).Encode([]bson.M{})
+		return
+	}
+
+	if matches == nil { matches = []bson.M{} }
+	json.NewEncoder(w).Encode(matches)
 }
