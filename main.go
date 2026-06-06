@@ -8,8 +8,9 @@ import (
 	"net/http"
 	"os"
 	"time"
-	"github.com/gorilla/websocket"
+
 	"github.com/corentings/chess"
+	"github.com/gorilla/websocket"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -24,19 +25,31 @@ type User struct {
 	Password string `json:"password" bson:"password"`
 }
 
+// 👉 ATUALIZADO: Agora usa Role ("w1", "b1", "w2", "b2") em vez de IsWhite
 type ClientInfo struct {
 	Username string
-	IsWhite  bool
-}	
+	Role     string 
+}
+
+// 👉 ATUALIZADO: Adicionado Mode e MaxPlayers
+type Room struct {
+	Mode         string
+	MaxPlayers   int
+	Game         *chess.Game
+	Clients      map[*websocket.Conn]*ClientInfo 
+	RematchVotes map[*websocket.Conn]bool        
+	Moves        []string                        
+}
+
+var rooms = make(map[string]*Room)
+var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 func main() {
-	// 1. Pega a URI do banco das variáveis de ambiente do Render
 	mongoURI := os.Getenv("MONGO_URI")
 	if mongoURI == "" {
 		log.Fatal("ERRO: A variável MONGO_URI não foi definida!")
 	}
 
-	// 2. Pega a porta do Render (ou usa 8080 se estiver rodando local)
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -56,23 +69,20 @@ func main() {
 
 	http.HandleFunc("/api/register", enableCORS(registerHandler))
 	http.HandleFunc("/api/login", enableCORS(loginHandler))
-	http.HandleFunc("/api/rooms", getRoomsHandler)
+	http.HandleFunc("/api/rooms", enableCORS(getRoomsHandler))
 	http.HandleFunc("/api/history", enableCORS(getHistoryHandler))
 	http.HandleFunc("/ws/play", playWsHandler)
-	// Usa a porta dinâmica obtida do sistema
+	
 	fmt.Println("Servidor rodando na porta :" + port + "...")
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-// O restante do código (enableCORS, registerHandler, loginHandler) continua EXATAMENTE O MESMO.
-
-// Middleware de CORS para permitir a comunicação com o Frontend separado
 func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		w.Header().Set("Content-Type", "application/json") // Força resposta sempre em JSON
+		w.Header().Set("Content-Type", "application/json") 
 		
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
@@ -82,7 +92,6 @@ func enableCORS(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// Handler para registrar novos usuários
 func registerHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -98,7 +107,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Criptografia da senha
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -110,7 +118,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Verifica se usuário já existe
 	var existingUser User
 	err = collection.FindOne(ctx, bson.M{"username": user.Username}).Decode(&existingUser)
 	if err == nil {
@@ -119,7 +126,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insere no banco Atlas
 	_, err = collection.InsertOne(ctx, user)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -131,7 +137,6 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "Usuário criado com sucesso!"})
 }
 
-// Handler para realizar o login
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -150,7 +155,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// 1. Busca o usuário no banco
 	var dbUser User
 	err = collection.FindOne(ctx, bson.M{"username": credentials.Username}).Decode(&dbUser)
 	if err != nil {
@@ -160,7 +164,6 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Valida a senha criptografada
 	err = bcrypt.CompareHashAndPassword([]byte(dbUser.Password), []byte(credentials.Password))
 	if err != nil {
 		log.Println("Tentativa de login: Senha incorreta para ->", credentials.Username)
@@ -169,37 +172,60 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Login válido
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "Login autorizado", 
 		"token": "fake-jwt-token-para-exemplo",
 	})
 }
-type Room struct {
-	Game         *chess.Game
-	Clients      map[*websocket.Conn]*ClientInfo // Agora guarda o ClientInfo
-	RematchVotes map[*websocket.Conn]bool        // Conta quem votou na revanche
-	Moves        []string 	
-}
 
-var rooms = make(map[string]*Room)
-var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-
-// Estruturas de entrada e saída
 type WSMessage struct {
-	Move string `json:"move"` // Recebe do Flutter. Ex: "e2e4"
+	Move string `json:"move"`
 }
+
+// 👉 ATUALIZADO: Estrutura de resposta enriquecida
 type WSResponse struct {
-	FEN          string   `json:"fen"`
-	Turn         string   `json:"turn"`
-	Status       string   `json:"status"`
-	PlayerCount  int      `json:"player_count"`
-	ValidMoves   []string `json:"valid_moves"`
-	WhiteName    string   `json:"white_name"`    // NOVO: Nome das Brancas
-	BlackName    string   `json:"black_name"`    // NOVO: Nome das Pretas
-	RematchVotes int      `json:"rematch_votes"` // NOVO: Quantos pediram revanche
-}	
+	FEN          string            `json:"fen"`
+	Turn         string            `json:"turn"`
+	Status       string            `json:"status"`
+	PlayerCount  int               `json:"player_count"`
+	MaxPlayers   int               `json:"max_players"`
+	ValidMoves   []string          `json:"valid_moves"`
+	Players      map[string]string `json:"players"`     // Quem está em cada cadeira
+	ActiveRole   string            `json:"active_role"` // De quem é a vez agora
+	RematchVotes int               `json:"rematch_votes"`
+	Mode         string            `json:"mode"`
+}
+
+// Descobre de quem é a vez com base na quantidade de lances já feitos
+func getActiveRole(room *Room) string {
+	moveCount := len(room.Moves)
+	if room.Mode == "2v2" {
+		roles := []string{"w1", "b1", "w2", "b2"}
+		return roles[moveCount%4]
+	}
+	roles := []string{"w1", "b1"}
+	return roles[moveCount%2]
+}
+
+// Distribui a próxima cadeira vazia disponível na sala
+func assignRole(room *Room) string {
+	taken := make(map[string]bool)
+	for _, c := range room.Clients {
+		taken[c.Role] = true
+	}
+	order := []string{"w1", "b1", "w2", "b2"}
+	for _, r := range order {
+		if !taken[r] {
+			// Se for 1v1, nunca distribui cadeiras "2"
+			if room.Mode != "2v2" && (r == "w2" || r == "b2") {
+				continue
+			}
+			return r
+		}
+	}
+	return ""
+}
 
 func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -209,60 +235,72 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	roomID := r.URL.Query().Get("room")
-	username := r.URL.Query().Get("user") // O Flutter vai mandar o nome por aqui!
+	username := r.URL.Query().Get("user") 
+	mode := r.URL.Query().Get("mode") 
 	
 	if roomID == "" { return }
 	if username == "" { username = "Anônimo" }
+	if mode == "" { mode = "1v1" }
 
 	if _, exists := rooms[roomID]; !exists {
+		max := 2
+		if mode == "2v2" { max = 4 }
 		rooms[roomID] = &Room{
+			Mode:         mode,
+			MaxPlayers:   max,
 			Game:         chess.NewGame(),
 			Clients:      make(map[*websocket.Conn]*ClientInfo),
 			RematchVotes: make(map[*websocket.Conn]bool),
+			Moves:        []string{},
 		}
 	}
 	
 	room := rooms[roomID]
 
-	if len(room.Clients) >= 2 {
+	// Limita entrada baseada no modo de jogo
+	if len(room.Clients) >= room.MaxPlayers {
 		conn.WriteJSON(map[string]string{"error": "Sala cheia"})
 		return
 	}
 
-	// Define a cor: Se já tem alguém e é branco, o novo é preto.
-	isWhite := true
-	for _, info := range room.Clients {
-		if info.IsWhite { isWhite = false }
-	}
+	assignedRole := assignRole(room)
+	if assignedRole == "" { return } // Falha se não houver cadeira
 
-	room.Clients[conn] = &ClientInfo{Username: username, IsWhite: isWhite}
+	room.Clients[conn] = &ClientInfo{Username: username, Role: assignedRole}
 	enviarEstado(room)
 
 	for {
 		var msg WSMessage
 		if err := conn.ReadJSON(&msg); err != nil {
 			delete(room.Clients, conn) 
-			delete(room.RematchVotes, conn) // Tira o voto se o cara sair
+			delete(room.RematchVotes, conn) 
 			
 			if len(room.Clients) == 0 {
 				delete(rooms, roomID) 
 			} else {
 				room.Game = chess.NewGame() 
+				room.Moves = []string{}
 				room.RematchVotes = make(map[*websocket.Conn]bool)
 				enviarEstado(room) 
 			}
 			break
 		}
 
-		// LÓGICA DE CONSENSO DA REVANCHE
+		// Revanche exige o voto de todos os jogadores presentes
 		if msg.Move == "rematch" {
 			room.RematchVotes[conn] = true
-			if len(room.RematchVotes) == 2 { // Se os DOIS votaram
+			if len(room.RematchVotes) == room.MaxPlayers { 
 				room.Game = chess.NewGame() 
+				room.Moves = []string{}
 				room.RematchVotes = make(map[*websocket.Conn]bool) 
 			}
 			enviarEstado(room) 
 			continue
+		}
+
+		// 👉 TRAVA DE SEGURANÇA MULTIPLAYER: Rejeita lances fora de turno
+		if room.Clients[conn].Role != getActiveRole(room) {
+			continue 
 		}
 
 		move, err := chess.UCINotation{}.Decode(room.Game.Position(), msg.Move)
@@ -276,20 +314,16 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
 func enviarEstado(room *Room) {
 	var validMovesStr []string
 	for _, move := range room.Game.ValidMoves() {
 		validMovesStr = append(validMovesStr, move.String())
 	}
 
-	// Descobre quem é quem para mandar para o Flutter
-	whiteName, blackName := "Aguardando...", "Aguardando..."
+	players := make(map[string]string)
 	for _, info := range room.Clients {
-		if info.IsWhite {
-			whiteName = info.Username
-		} else {
-			blackName = info.Username
-		}
+		players[info.Role] = info.Username
 	}
 
 	resp := WSResponse{
@@ -297,10 +331,12 @@ func enviarEstado(room *Room) {
 		Turn:         room.Game.Position().Turn().Name(),
 		Status:       room.Game.Outcome().String(),
 		PlayerCount:  len(room.Clients),
+		MaxPlayers:   room.MaxPlayers,
 		ValidMoves:   validMovesStr,
-		WhiteName:    whiteName,
-		BlackName:    blackName,
-		RematchVotes: len(room.RematchVotes), // Manda quantos já pediram revanche
+		Players:      players,
+		ActiveRole:   getActiveRole(room),
+		RematchVotes: len(room.RematchVotes),
+		Mode:         room.Mode,
 	}
 	
 	for client := range room.Clients {
@@ -309,60 +345,61 @@ func enviarEstado(room *Room) {
 }
 
 func salvarPartidaNoMongo(roomID string, room *Room) {
-	whiteName, blackName := "Desconhecido", "Desconhecido"
+	players := make(map[string]string)
 	for _, info := range room.Clients {
-		if info.IsWhite { whiteName = info.Username } else { blackName = info.Username }
+		players[info.Role] = info.Username
 	}
 
-	opts := options.Update().SetUpsert(true) // Cria o registro se não existir
+	opts := options.Update().SetUpsert(true)
 	matchesCollection.UpdateOne(
 		context.Background(),
 		bson.M{"_id": roomID},
 		bson.M{"$set": bson.M{
+			"mode":        room.Mode,
 			"current_fen": room.Game.FEN(),
-			"white_name":  whiteName,
-			"black_name":  blackName,
+			"white_name":  players["w1"], 
+			"black_name":  players["b1"],
+			"w2_name":     players["w2"], 
+			"b2_name":     players["b2"],
 			"status":      room.Game.Outcome().String(),
-			"date":        time.Now().Format("02/01/2006"), // Salva a data atual
+			"date":        time.Now().Format("02/01/2006"), 
 			"moves":       room.Moves,
 		}},
 		opts,
 	)
 }
-// Crie esta struct para formatar a resposta JSON (Pode colocar junto com as outras structs)
+
+// 👉 ATUALIZADO: Sala agora avisa sobre Max e Mode
 type RoomInfo struct {
 	ID        string `json:"id"`
 	Nome      string `json:"nome"`
 	Jogadores int    `json:"jogadores"`
+	Max       int    `json:"max"`
+	Mode      string `json:"mode"`
 }
 
-// Handler para listar as salas disponíveis
 func getRoomsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*") 
-
 	var activeRooms []RoomInfo
 
 	for id, room := range rooms {
-		if len(room.Clients) < 2 {
+		if len(room.Clients) < room.MaxPlayers {
 			activeRooms = append(activeRooms, RoomInfo{
 				ID:        id,
 				Nome:      "Sala " + id, 
 				Jogadores: len(room.Clients),
+				Max:       room.MaxPlayers,
+				Mode:      room.Mode,
 			})
 		}
 	}
 
-	if activeRooms == nil {
-		activeRooms = []RoomInfo{}
-	}
-
+	if activeRooms == nil { activeRooms = []RoomInfo{} }
 	json.NewEncoder(w).Encode(activeRooms)
 }
-// Handler que busca no MongoDB as partidas que o usuário jogou
+
 func getHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	username := r.URL.Query().Get("user")
 	if username == "" {
@@ -373,11 +410,13 @@ func getHistoryHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Busca no banco onde o nome for igual ao das Brancas OU das Pretas
+	// 👉 ATUALIZADO: Busca nas 4 cadeiras possíveis
 	filter := bson.M{
 		"$or": []bson.M{
 			{"white_name": username},
 			{"black_name": username},
+			{"w2_name": username},
+			{"b2_name": username},
 		},
 	}
 
