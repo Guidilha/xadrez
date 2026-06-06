@@ -180,6 +180,7 @@ type Room struct {
 	Game         *chess.Game
 	Clients      map[*websocket.Conn]*ClientInfo // Agora guarda o ClientInfo
 	RematchVotes map[*websocket.Conn]bool        // Conta quem votou na revanche
+	Moves        []string 	
 }
 
 var rooms = make(map[string]*Room)
@@ -268,6 +269,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			err = room.Game.Move(move) 
 			if err == nil {
+				room.Moves = append(room.Moves, msg.Move)
 				salvarPartidaNoMongo(roomID, room)
 				enviarEstado(room)
 			}
@@ -322,6 +324,7 @@ func salvarPartidaNoMongo(roomID string, room *Room) {
 			"black_name":  blackName,
 			"status":      room.Game.Outcome().String(),
 			"date":        time.Now().Format("02/01/2006"), // Salva a data atual
+			"moves":       room.Moves,
 		}},
 		opts,
 	)
