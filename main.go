@@ -27,7 +27,7 @@ type User struct {
 type ClientInfo struct {
 	Username string
 	IsWhite  bool
-}
+}	
 
 func main() {
 	// 1. Pega a URI do banco das variáveis de ambiente do Render
@@ -233,7 +233,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		if info.IsWhite { isWhite = false }
 	}
 
-	room.Clients[conn] = &	{Username: username, IsWhite: isWhite}
+	room.Clients[conn] = &ClientInfo{Username: username, IsWhite: isWhite}
 	enviarEstado(room)
 
 	for {
