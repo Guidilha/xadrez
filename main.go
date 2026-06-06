@@ -57,6 +57,7 @@ func main() {
 	http.HandleFunc("/api/register", enableCORS(registerHandler))
 	http.HandleFunc("/api/login", enableCORS(loginHandler))
 	http.HandleFunc("/api/rooms", getRoomsHandler)
+	http.HandleFunc("/api/history", enableCORS(getHistoryHandler))
 	http.HandleFunc("/ws/play", playWsHandler)
 	// Usa a porta dinâmica obtida do sistema
 	fmt.Println("Servidor rodando na porta :" + port + "...")
