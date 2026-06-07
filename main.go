@@ -198,10 +198,10 @@ type WSResponse struct {
 	Mode          string            `json:"mode"`
 }
 func get3v3Roles(room *Room) (propA string, propB string, decider string) {
-	turnIdx := len(room.Moves) / 2 // Conta quantos lances completos a partida tem
-	deciderNum := (turnIdx % 3) + 1 // Ciclo: 1 -> 2 -> 3 -> 1...
+	turnIdx := len(room.Moves) / 2 
+	deciderNum := (turnIdx % 3) + 1 
 
-	if room.Game.Position().Turn().Name() == "white" {
+	if room.Game.Position().Turn().Name() == "White" {
 		decider = fmt.Sprintf("w%d", deciderNum)
 		if deciderNum == 1 { return "w2", "w3", "w1" }
 		if deciderNum == 2 { return "w1", "w3", "w2" }
