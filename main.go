@@ -209,22 +209,34 @@ func getActiveRole(room *Room) string {
 }
 
 // Distribui a próxima cadeira vazia disponível na sala
-func assignRole(room *Room) string {
+func assignRole(room *Room, preferredTeam string) string {
 	taken := make(map[string]bool)
 	for _, c := range room.Clients {
 		taken[c.Role] = true
 	}
-	order := []string{"w1", "b1", "w2", "b2"}
+
+	var order []string
+	if preferredTeam == "w" {
+		order = []string{"w1", "w2", "w3"} // Busca as cadeiras brancas
+	} else if preferredTeam == "b" {
+		order = []string{"b1", "b2", "b3"} // Busca as cadeiras pretas
+	} else {
+		order = []string{"w1", "b1", "w2", "b2", "w3", "b3"} // Aleatório
+	}
+
 	for _, r := range order {
 		if !taken[r] {
-			// Se for 1v1, nunca distribui cadeiras "2"
-			if room.Mode != "2v2" && (r == "w2" || r == "b2") {
+			// Bloqueia as cadeiras excedentes dependendo do modo
+			if room.Mode == "1v1" && (r == "w2" || r == "b2" || r == "w3" || r == "b3") {
+				continue
+			}
+			if room.Mode == "2v2" && (r == "w3" || r == "b3") {
 				continue
 			}
 			return r
 		}
 	}
-	return ""
+	return "" // Retorna vazio se a equipe ou a sala estiver cheia
 }
 
 func playWsHandler(w http.ResponseWriter, r *http.Request) {
@@ -237,10 +249,12 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	roomID := r.URL.Query().Get("room")
 	username := r.URL.Query().Get("user") 
 	mode := r.URL.Query().Get("mode") 
+	team := r.URL.Query().Get("team")
 	
 	if roomID == "" { return }
 	if username == "" { username = "Anônimo" }
 	if mode == "" { mode = "1v1" }
+	if team == "" { team = "w" }
 
 	if _, exists := rooms[roomID]; !exists {
 		max := 2
@@ -263,8 +277,11 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assignedRole := assignRole(room)
-	if assignedRole == "" { return } // Falha se não houver cadeira
+	assignedRole := assignRole(room, team)
+	if assignedRole == "" {
+		conn.WriteJSON(map[string]string{"error": "Esta equipe já está lotada!"})
+		return 
+	}
 
 	room.Clients[conn] = &ClientInfo{Username: username, Role: assignedRole}
 	enviarEstado(room)
