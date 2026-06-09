@@ -198,7 +198,7 @@ type WSResponse struct {
 	ProposedMoves map[string]string `json:"proposed_moves"`
 	RematchVotes  int               `json:"rematch_votes"`
 	Mode          string            `json:"mode"`
-	DrawOffer     string		`json:"draw_offer	"`
+	DrawOffer     string 		`json:"draw_offer"`
 }
 func get3v3Roles(room *Room) (propA string, propB string, decider string) {
 	turnIdx := len(room.Moves) / 2 
