@@ -40,6 +40,7 @@ type Room struct {
 	RematchVotes map[*websocket.Conn]bool        
 	Moves        []string   
 	ProposedMoves map[string]string
+	DrawOffer string
 }
 
 var rooms = make(map[string]*Room)
@@ -196,6 +197,7 @@ type WSResponse struct {
 	ProposedMoves map[string]string `json:"proposed_moves"`
 	RematchVotes  int               `json:"rematch_votes"`
 	Mode          string            `json:"mode"`
+	DrawOffer     string		`json:"draw_offer	"`
 }
 func get3v3Roles(room *Room) (propA string, propB string, decider string) {
 	turnIdx := len(room.Moves) / 2 
@@ -322,6 +324,34 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 			enviarEstado(room)
 			continue
 		}
+		
+		if msg.Move == "resign" {
+			role := room.Clients[conn].Role
+			if strings.HasPrefix(role, "w") {
+				room.Game.Resign(chess.White) // Brancas desistem, Pretas ganham
+			} else {
+				room.Game.Resign(chess.Black) // Pretas desistem, Brancas ganham
+			}
+			salvarPartidaNoMongo(roomID, room)
+			enviarEstado(room)
+			continue
+		}
+
+		if msg.Move == "offer_draw" {
+			role := room.Clients[conn].Role
+			team := string(role[0]) // Retira a letra "w" ou "b"
+			
+			if room.DrawOffer == "" {
+				room.DrawOffer = team // Regista a primeira equipa a pedir
+			} else if room.DrawOffer != team {
+				// Se a equipa contrária pedir também, o empate é selado!
+				room.Game.Draw(chess.DrawOffer)
+				room.DrawOffer = ""
+				salvarPartidaNoMongo(roomID, room)
+			}
+			enviarEstado(room)
+			continue
+		}
 
 		// 👉 LÓGICA DE INTERCEÇÃO E PROCESSAMENTO DO MODO 3v3
 		if room.Mode == "3v3" {
@@ -377,7 +407,15 @@ func executarLanceFinal(room *Room, roomID string, uciMove string) {
 		err = room.Game.Move(move)
 		if err == nil {
 			room.Moves = append(room.Moves, uciMove)
-			room.ProposedMoves = make(map[string]string) // Reseta propostas para o próximo turno
+			room.ProposedMoves = make(map[string]string)
+			room.DrawOffer = "" // 👉 Reseta o pedido de empate caso alguém faça um lance
+
+			// 👉 ÁRBITRO AUTOMÁTICO: Força o empate na Tríplice Repetição ou Regra dos 50 lances
+			draws := room.Game.EligibleDraws()
+			if len(draws) > 0 {
+				room.Game.Draw(draws[0]) 
+			}
+
 			salvarPartidaNoMongo(roomID, room)
 			enviarEstado(room)
 		}
@@ -440,6 +478,7 @@ func enviarEstado(room *Room) {
 			ProposedMoves: filteredMoves,
 			RematchVotes:  len(room.RematchVotes),
 			Mode:          room.Mode,
+			DrawOffer:     room.DrawOffer,
 		}
 		client.WriteJSON(resp)
 	}
