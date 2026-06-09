@@ -392,7 +392,8 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		if room.Clients[conn].Role != getActiveRole1v1And2v2(room) { continue }
 		executarLanceFinal(room, roomID, msg.Move, room.Clients[conn].Role) // 👉 ATUALIZADO
 	}
-}func executarLanceFinal(room *Room, roomID string, uciMove string, role string) {
+}
+func executarLanceFinal(room *Room, roomID string, uciMove string, role string) {
 	move, err := chess.UCINotation{}.Decode(room.Game.Position(), uciMove)
 	if err == nil {
 		err = room.Game.Move(move)
