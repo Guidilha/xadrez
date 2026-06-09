@@ -268,7 +268,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 	if _, exists := rooms[roomID]; !exists {
 		max := 2
 		if mode == "2v2" { max = 4 }
-		if mode == "3v3" { max = 6 } // 👉 LIBERA ESPAÇO PARA 6 JOGADORES
+		if mode == "3v3" { max = 6 }
 		
 		rooms[roomID] = &Room{
 			Mode:          mode,
@@ -309,6 +309,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 				room.Moves = []string{}
 				room.ProposedMoves = make(map[string]string)
 				room.RematchVotes = make(map[*websocket.Conn]bool)
+				room.DrawOffer = "" // 👉 CORREÇÃO: Limpa o empate se alguém sair
 				enviarEstado(room)
 			}
 			break
@@ -321,17 +322,18 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 				room.Moves = []string{}
 				room.ProposedMoves = make(map[string]string)
 				room.RematchVotes = make(map[*websocket.Conn]bool)
+				room.DrawOffer = "" // 👉 CORREÇÃO: Limpa o empate na revanche!
 			}
 			enviarEstado(room)
 			continue
 		}
-		
+
 		if msg.Move == "resign" {
 			role := room.Clients[conn].Role
 			if strings.HasPrefix(role, "w") {
-				room.Game.Resign(chess.White) // Brancas desistem, Pretas ganham
+				room.Game.Resign(chess.White)
 			} else {
-				room.Game.Resign(chess.Black) // Pretas desistem, Brancas ganham
+				room.Game.Resign(chess.Black)
 			}
 			salvarPartidaNoMongo(roomID, room)
 			enviarEstado(room)
@@ -340,12 +342,11 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 
 		if msg.Move == "offer_draw" {
 			role := room.Clients[conn].Role
-			team := string(role[0]) // Retira a letra "w" ou "b"
+			teamStr := string(role[0])
 			
 			if room.DrawOffer == "" {
-				room.DrawOffer = team // Regista a primeira equipa a pedir
-			} else if room.DrawOffer != team {
-				// Se a equipa contrária pedir também, o empate é selado!
+				room.DrawOffer = teamStr
+			} else if room.DrawOffer != teamStr {
 				room.Game.Draw(chess.DrawOffer)
 				room.DrawOffer = ""
 				salvarPartidaNoMongo(roomID, room)
@@ -354,42 +355,33 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// 👉 LÓGICA DE INTERCEÇÃO E PROCESSAMENTO DO MODO 3v3
 		if room.Mode == "3v3" {
 			role := room.Clients[conn].Role
 			propA, propB, decider := get3v3Roles(room)
 
-			// Se for um dos Proponentes da vez
 			if role == propA || role == propB {
 				room.ProposedMoves[role] = msg.Move
-
 				moveA := room.ProposedMoves[propA]
 				moveB := room.ProposedMoves[propB]
 
-				// Se AMBOS já votaram
 				if moveA != "" && moveB != "" {
 					if moveA == moveB {
-						// Unanimidade! Executa o movimento direto
-						executarLanceFinal(room, roomID, moveA)
+						executarLanceFinal(room, roomID, moveA, propA) // 👉 ATUALIZADO
 					} else {
-						// Divergência: Não executa e notifica para o desempate começar
 						enviarEstado(room)
 					}
 				} else {
-					// Apenas um votou, atualiza para mostrar o indicador visual de clique
 					enviarEstado(room)
 				}
 				continue
 			}
 
-			// Se for o Árbitro Desempacador da vez
 			if role == decider {
 				moveA := room.ProposedMoves[propA]
 				moveB := room.ProposedMoves[propB]
-				// Só aceita o clique se houver um impasse real de lances diferentes
 				if moveA != "" && moveB != "" && moveA != moveB {
 					if msg.Move == moveA || msg.Move == moveB {
-						executarLanceFinal(room, roomID, msg.Move)
+						executarLanceFinal(room, roomID, msg.Move, decider) // 👉 ATUALIZADO
 					}
 				}
 				continue
@@ -397,21 +389,24 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// LÓGICA PADRÃO PARA MÓDOS 1v1 E 2v2
 		if room.Clients[conn].Role != getActiveRole1v1And2v2(room) { continue }
-		executarLanceFinal(room, roomID, msg.Move)
+		executarLanceFinal(room, roomID, msg.Move, room.Clients[conn].Role) // 👉 ATUALIZADO
 	}
-}
-func executarLanceFinal(room *Room, roomID string, uciMove string) {
+}func executarLanceFinal(room *Room, roomID string, uciMove string, role string) {
 	move, err := chess.UCINotation{}.Decode(room.Game.Position(), uciMove)
 	if err == nil {
 		err = room.Game.Move(move)
 		if err == nil {
 			room.Moves = append(room.Moves, uciMove)
 			room.ProposedMoves = make(map[string]string)
-			room.DrawOffer = "" // 👉 Reseta o pedido de empate caso alguém faça um lance
+			
+			// 👉 CORREÇÃO: Só cancela o pedido de empate se a EQUIPA ADVERSÁRIA fizer um lance
+			teamQueJogou := string(role[0])
+			if room.DrawOffer != "" && room.DrawOffer != teamQueJogou {
+				room.DrawOffer = "" 
+			}
 
-			// 👉 ÁRBITRO AUTOMÁTICO: Força o empate na Tríplice Repetição ou Regra dos 50 lances
+			// 👉 Árbitro Automático: Força o empate se der Tríplice Repetição
 			draws := room.Game.EligibleDraws()
 			if len(draws) > 0 {
 				room.Game.Draw(draws[0]) 
