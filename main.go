@@ -393,7 +393,7 @@ func playWsHandler(w http.ResponseWriter, r *http.Request) {
 		executarLanceFinal(room, roomID, msg.Move, room.Clients[conn].Role) // 👉 ATUALIZADO
 	}
 }
-func executarLanceFinal(room *Room, roomID string, uciMove string, role string) {
+func ejecutarLanceFinal(room *Room, roomID string, uciMove string, role string) {
 	move, err := chess.UCINotation{}.Decode(room.Game.Position(), uciMove)
 	if err == nil {
 		err = room.Game.Move(move)
@@ -401,18 +401,13 @@ func executarLanceFinal(room *Room, roomID string, uciMove string, role string) 
 			room.Moves = append(room.Moves, uciMove)
 			room.ProposedMoves = make(map[string]string)
 			
-			// 👉 CORREÇÃO: Só cancela o pedido de empate se a EQUIPA ADVERSÁRIA fizer um lance
+			// Se a equipa contrária fizer um lance, o pedido de empate expira
 			teamQueJogou := string(role[0])
 			if room.DrawOffer != "" && room.DrawOffer != teamQueJogou {
 				room.DrawOffer = "" 
 			}
 
-			// 👉 Árbitro Automático: Força o empate se der Tríplice Repetição
-			draws := room.Game.EligibleDraws()
-			if len(draws) > 0 {
-				room.Game.Draw(draws[0]) 
-			}
-
+			// O motor de xadrez já trata o Rei Afogado e Material Insuficiente automaticamente aqui.
 			salvarPartidaNoMongo(roomID, room)
 			enviarEstado(room)
 		}
